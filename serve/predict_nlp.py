@@ -11,9 +11,11 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data
 
-from model import LSTMClassifier
 
-from utils import review_to_words, convert_and_pad
+
+from utils_nlp import tokenize
+
+from model_nlp import CNN
 
 def model_fn(model_dir):
     """Load the PyTorch model from the `model_dir` directory."""
@@ -29,22 +31,36 @@ def model_fn(model_dir):
 
     # Determine the device and construct the model.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = LSTMClassifier(model_info['embedding_dim'], model_info['hidden_dim'], model_info['vocab_size'])
-
-    # Load the store model parameters.
-    model_path = os.path.join(model_dir, 'model.pth')
+    #model = LSTMClassifier(model_info['embedding_dim'], model_info['hidden_dim'], 
+    #model_info['vocab_size'])
+    
+    INPUT_DIM =  20002 # len(TEXT.vocab)
+    EMBEDDING_DIM = 100
+    N_FILTERS = 100
+    FILTER_SIZES = [2,3,4]
+    OUTPUT_DIM = 6
+    DROPOUT = 0.5
+    PAD_IDX = 1 # TEXT.vocab.stoi[TEXT.pad_token]
+    
+    model = CNN(INPUT_DIM, EMBEDDING_DIM, N_FILTERS, 
+                FILTER_SIZES, OUTPUT_DIM, DROPOUT, 
+                PAD_IDX)
+    
+    # Load the stored model parameters.
+    model_path = os.path.join(model_dir, 'model_state.pt')
     with open(model_path, 'rb') as f:
         model.load_state_dict(torch.load(f))
-
+        
     # Load the saved word_dict.
     word_dict_path = os.path.join(model_dir, 'word_dict.pkl')
     with open(word_dict_path, 'rb') as f:
         model.word_dict = pickle.load(f)
-
+           
     model.to(device).eval()
 
     print("Done loading model.")
     return model
+
 
 def input_fn(serialized_input_data, content_type):
     print('Deserializing the input data.')
@@ -57,7 +73,18 @@ def output_fn(prediction_output, accept):
     print('Serializing the generated output.')
     return str(prediction_output)
 
-def predict_fn(input_data, model):
+def translate_labels(labels_list):
+    toxic_labels = ["toxic", "severe_toxic", 
+                    "obscene", "threat", "insult", 
+                    "identity_hate"]
+    output_string = 'Your text has been classified as:\n'
+        
+    for j,i in enumerate(labels_list):
+        if i==1.: output_string+= toxic_labels[j]+'\n'
+        else: output_string+= 'Not '+toxic_labels[j]+'\n'
+    return output_string 
+
+def predict_fn(input_text, model):
     print('Inferring sentiment of input data.')
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,30 +92,24 @@ def predict_fn(input_data, model):
     if model.word_dict is None:
         raise Exception('Model has not been loaded properly, no word_dict.')
     
-    # TODO: Process input_data so that it is ready to be sent to our model.
-    #       You should produce two variables:
-    #         data_X   - A sequence of length 500 which represents the converted review
-    #         data_len - The length of the review
-
-    data_X, data_len = convert_and_pad(model.word_dict, review_to_words(input_data))
-
-    # Using data_X and data_len we construct an appropriate input tensor. Remember
-    # that our model expects input data of the form 'len, review[500]'.
-    data_pack = np.hstack((data_len, data_X))
-    data_pack = data_pack.reshape(1, -1)
+    word_dict = model.word_dict
     
-    data = torch.from_numpy(data_pack)
-    data = data.to(device)
+    
+    tokenized = tokenize(word_dict, input_text)
 
+    tensor = torch.LongTensor(tokenized).to(device)
+    tensor = tensor.unsqueeze(1)
+    
+    
     # Make sure to put the model into evaluation mode
     model.eval()
 
-    # TODO: Compute the result of applying the model to the input data. The variable `result` should
-    #       be a numpy array which contains a single integer which is either 1 or 0
+    #raise Exception('This is the input: ' + tensor)
 
     with torch.no_grad():
-        output = model.forward(data)
+        output = model.forward(tensor)
+        prediction = torch.sigmoid(output).squeeze().detach()
 
-    result = np.round(output.numpy())
+    result = np.round(prediction).tolist()
 
-    return result
+    return translate_labels(result)
